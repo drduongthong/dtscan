@@ -14,7 +14,7 @@ public partial class Form1 : Form
     private readonly ScannerService _scannerService = new();
     private readonly SaveService _saveService = new();
     private readonly ScanHistoryService _scanHistoryService = new();
-    private readonly List<Image> _originalImages = [];
+    private readonly PageStore _pageStore = new();
     private readonly List<string?> _pageSessionIds = [];
     private readonly Dictionary<string, int> _sessionPageCounts = new();
     private int _nextBatchStart;
@@ -116,6 +116,7 @@ public partial class Form1 : Form
         var wheelFilter = new CtrlWheelZoomFilter(this);
         Application.AddMessageFilter(wheelFilter);
         FormClosed += (_, _) => Application.RemoveMessageFilter(wheelFilter);
+        FormClosed += (_, _) => _pageStore.Dispose();
 
         // Kéo thả file ảnh vào form
         AllowDrop = true;
@@ -181,13 +182,15 @@ public partial class Form1 : Form
                     foreach (var page in LoadPdfPages(file, dpi))
                     {
                         AddPage(page);
+                        page.Dispose();
                         count++;
                     }
                 }
                 else
                 {
                     using var img = Image.FromFile(file);
-                    AddPage(new Bitmap(img));
+                    using var bmp = new Bitmap(img);
+                    AddPage(bmp);
                     count++;
                 }
             }
@@ -267,23 +270,37 @@ public partial class Form1 : Form
         SetStatus("Scanning…", Color.FromArgb(245, 158, 11));
         btnScan.Enabled = false;
 
+        int pagesBeforeScan = _pageStore.Count;
+        int scannedCount = 0;
+
         try
         {
-            var pages = _scannerService.Scan(
+            _scannerService.Scan(
                 profile.ScanSource, profile.ScanDpi, profile.ColorMode,
-                profile.ScanDriver, this.Handle, profile.PreferredScanner);
+                profile.ScanDriver, this.Handle, profile.PreferredScanner,
+                onPageScanned: page =>
+                {
+                    scannedCount++;
+                    AddPage(page);
+                    SetStatus($"Scanning… {scannedCount} page(s)",
+                        Color.FromArgb(245, 158, 11));
+                });
 
-            if (pages.Count > 0)
+            if (scannedCount > 0)
             {
-                var historyEntry = _scanHistoryService.SaveBackup(pages, profile);
-                foreach (var page in pages)
-                    AddPage(page, historyEntry.Id);
+                var historyEntry = _scanHistoryService.SaveBackup(
+                    i => _pageStore.Load(pagesBeforeScan + i),
+                    scannedCount, profile);
 
-                SetStatus($"Scanned {pages.Count} page(s) — {profile.ScanSource}",
+                for (int i = pagesBeforeScan; i < _pageStore.Count; i++)
+                    _pageSessionIds[i] = historyEntry.Id;
+                _sessionPageCounts[historyEntry.Id] = scannedCount;
+
+                SetStatus($"Scanned {scannedCount} page(s) — {profile.ScanSource}",
                     Color.FromArgb(16, 185, 129));
 
                 if (profile.AutoSave)
-                    PerformAutoSave(pages);
+                    PerformAutoSave(pagesBeforeScan, scannedCount);
             }
             else
             {
@@ -369,11 +386,11 @@ public partial class Form1 : Form
             if (indices.Count == 0) break;
 
             // Hiện dialog Save Pack với zoomed preview trang đầu
-            var firstImage = _originalImages[indices[0]];
+            using var firstImage = _pageStore.Load(indices[0]);
             int firstPage = indices[0] + 1;
             int lastPage = indices[^1] + 1;
 
-            var (action, label, deleteAfter) = ShowSavePackDialog(
+            var (action, label, deleteAfter, customSavePath) = ShowSavePackDialog(
                 firstImage, indices.Count, firstPage, lastPage, profile);
 
             if (action == PackAction.Cancel) break;
@@ -382,26 +399,37 @@ public partial class Form1 : Form
             {
                 try
                 {
-                    var images = indices.Select(i => _originalImages[i]).ToList();
-                    var labels = Enumerable.Repeat(label, images.Count).ToList();
+                    string path;
 
-                    // Check for file name conflict
-                    string? resolvedFilePath = null;
-                    var expectedPath = _saveService.BuildFirstTargetPath(profile, label);
-                    if (File.Exists(expectedPath))
+                    if (customSavePath != null)
                     {
-                        var resolution = ShowDuplicateFileDialog(expectedPath, firstImage);
-                        if (resolution == null) break; // User cancelled
-
-                        if (resolution.Value.renameExistingTo != null)
-                            File.Move(expectedPath, resolution.Value.renameExistingTo);
-
-                        resolvedFilePath = resolution.Value.newFilePath;
+                        path = _saveService.SaveToPath(
+                            i => _pageStore.Load(indices[i]),
+                            indices.Count, customSavePath);
                     }
+                    else
+                    {
+                        var labels = Enumerable.Repeat(label, indices.Count).ToList();
 
-                    var path = _saveService.SavePages(
-                        images, profile, labels, 1, resolvedFilePath);
-                    _profileManager.Save();
+                        // Check for file name conflict
+                        string? resolvedFilePath = null;
+                        var expectedPath = _saveService.BuildFirstTargetPath(profile, label);
+                        if (File.Exists(expectedPath))
+                        {
+                            var resolution = ShowDuplicateFileDialog(expectedPath, firstImage);
+                            if (resolution == null) break; // User cancelled
+
+                            if (resolution.Value.renameExistingTo != null)
+                                File.Move(expectedPath, resolution.Value.renameExistingTo);
+
+                            resolvedFilePath = resolution.Value.newFilePath;
+                        }
+
+                        path = _saveService.SavePages(
+                            i => _pageStore.Load(indices[i]),
+                            indices.Count, profile, labels, 1, resolvedFilePath);
+                        _profileManager.Save();
+                    }
 
                     string range = firstPage == lastPage
                         ? $"trang {firstPage}" : $"trang {firstPage}–{lastPage}";
@@ -440,13 +468,14 @@ public partial class Form1 : Form
     //  Bên phải: nhập label, thông tin, preview tên file
     // ═══════════════════════════════════════════════
 
-    private (PackAction action, string label, bool deleteAfter) ShowSavePackDialog(
+    private (PackAction action, string label, bool deleteAfter, string? customSavePath) ShowSavePackDialog(
         Image firstPageImage, int pageCount, int firstPage, int lastPage,
         UserProfile profile)
     {
         var action = PackAction.Cancel;
         string label = "";
         bool deleteAfter = profile.DeleteAfterSave;
+        string? customSavePath = null;
 
         string rangeText = firstPage == lastPage
             ? $"Trang {firstPage} (1 trang)"
@@ -637,11 +666,54 @@ public partial class Form1 : Form
         };
         dlg.Controls.Add(btnCancelDlg);
 
+        var btnSaveAs = new Button
+        {
+            Text = "📂  Lưu tới đường dẫn khác…",
+            Location = new Point(rx, ry + 52),
+            Size = new Size(rw, 34),
+            FlatStyle = FlatStyle.Flat, Cursor = Cursors.Hand,
+            ForeColor = Color.FromArgb(59, 130, 246),
+            BackColor = Color.Transparent,
+            Font = new Font("Segoe UI", 9f),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        btnSaveAs.FlatAppearance.BorderSize = 0;
+        btnSaveAs.Click += (_, _) =>
+        {
+            int filterIndex = profile.DefaultFormat switch
+            {
+                SaveFormat.JPEG => 2,
+                SaveFormat.BMP => 3,
+                SaveFormat.TIFF => 4,
+                SaveFormat.PDF => 5,
+                _ => 1
+            };
+            using var sfd = new SaveFileDialog
+            {
+                Title = "Chọn đường dẫn lưu",
+                Filter = "PNG Image|*.png|JPEG Image|*.jpg|BMP Image|*.bmp|TIFF Image|*.tiff|PDF Document|*.pdf",
+                FilterIndex = filterIndex,
+                InitialDirectory = Directory.Exists(profile.SavePath)
+                    ? profile.SavePath : Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                FileName = string.IsNullOrWhiteSpace(txtLabel.Text)
+                    ? "scan" : txtLabel.Text.Trim()
+            };
+            if (sfd.ShowDialog(dlg) == DialogResult.OK)
+            {
+                customSavePath = sfd.FileName;
+                action = PackAction.Save;
+                label = txtLabel.Text.Trim();
+                deleteAfter = chkDelete.Checked;
+                dlg.DialogResult = DialogResult.OK;
+            }
+        };
+        dlg.Controls.Add(btnSaveAs);
+
         dlg.AcceptButton = btnSave;
         dlg.Shown += (_, _) => txtLabel.Focus();
         dlg.ShowDialog(this);
 
-        return (action, label, deleteAfter);
+        return (action, label, deleteAfter, customSavePath);
     }
 
     private static void AddInfoLabel(Form parent, int x, ref int y, string text)
@@ -1133,14 +1205,15 @@ public partial class Form1 : Form
         return result;
     }
 
-    private void PerformAutoSave(List<Image> pages)
+    private void PerformAutoSave(int startIndex, int count)
     {
         var profile = _profileManager.ActiveProfile;
         try
         {
-            var resultPath = _saveService.SavePages(pages, profile);
+            var resultPath = _saveService.SavePages(
+                i => _pageStore.Load(startIndex + i), count, profile);
             _profileManager.Save();
-            SetStatus($"Auto-saved {pages.Count} page(s) → {resultPath}",
+            SetStatus($"Auto-saved {count} page(s) → {resultPath}",
                 Color.FromArgb(16, 185, 129));
         }
         catch (Exception ex)
@@ -1289,7 +1362,10 @@ public partial class Form1 : Form
         if (form.ShowDialog(this) == DialogResult.OK && form.RestoredImages is { Count: > 0 })
         {
             foreach (var img in form.RestoredImages)
+            {
                 AddPage(img);
+                img.Dispose();
+            }
             SetStatus($"Khôi phục {form.RestoredImages.Count} trang từ lịch sử",
                 Color.FromArgb(16, 185, 129));
         }
@@ -1335,8 +1411,10 @@ public partial class Form1 : Form
         for (int i = 0; i < thumbnails.Count; i++)
         {
             if (!thumbnails[i].IsSelected) continue;
-            _originalImages[i].RotateFlip(rotation);
-            thumbnails[i].PageImage = CreateThumbnail(_originalImages[i]);
+            using var img = _pageStore.Load(i);
+            img.RotateFlip(rotation);
+            _pageStore.Replace(i, img);
+            thumbnails[i].PageImage = CreateThumbnail(img);
             thumbnails[i].Invalidate();
         }
     }
@@ -1376,8 +1454,7 @@ public partial class Form1 : Form
             }
             _pageSessionIds.RemoveAt(idx);
 
-            _originalImages[idx].Dispose();
-            _originalImages.RemoveAt(idx);
+            _pageStore.RemoveAt(idx);
             var ctrl = (PageThumbnailControl)flpPages.Controls[idx];
             flpPages.Controls.RemoveAt(idx);
             ctrl.Dispose();
@@ -1387,7 +1464,7 @@ public partial class Form1 : Form
         for (int i = 0; i < remaining.Count; i++)
             remaining[i].PageNumber = i + 1;
 
-        _nextBatchStart = Math.Min(_nextBatchStart, _originalImages.Count);
+        _nextBatchStart = Math.Min(_nextBatchStart, _pageStore.Count);
     }
 
     // ═══════════════════════════════════════════════
@@ -1434,14 +1511,14 @@ public partial class Form1 : Form
 
     private void AddPage(Image original, string? sessionId = null)
     {
-        _originalImages.Add(original);
+        _pageStore.Add(original);
         _pageSessionIds.Add(sessionId);
         if (sessionId != null)
         {
             _sessionPageCounts.TryAdd(sessionId, 0);
             _sessionPageCounts[sessionId]++;
         }
-        int pageNum = _originalImages.Count;
+        int pageNum = _pageStore.Count;
         int thumbH = (int)(_thumbnailWidth * 1.5);
 
         var thumb = new PageThumbnailControl
@@ -1451,7 +1528,11 @@ public partial class Form1 : Form
             PageNumber = pageNum
         };
         thumb.SelectionChanged += (_, _) => UpdateUI();
-        thumb.DoubleClick += (_, _) => ShowPreview(original);
+        thumb.DoubleClick += (_, _) =>
+        {
+            using var img = _pageStore.Load(thumb.PageNumber - 1);
+            ShowPreview(img);
+        };
 
         flpPages.Controls.Add(thumb);
         UpdateUI();
@@ -1486,8 +1567,9 @@ public partial class Form1 : Form
         for (int i = 0; i < thumbnails.Count; i++)
         {
             thumbnails[i].PageImage?.Dispose();
+            using var img = _pageStore.Load(i);
             thumbnails[i].PageImage = CreateThumbnail(
-                _originalImages[i], _thumbnailWidth - 16, thumbH - 72);
+                img, _thumbnailWidth - 16, thumbH - 72);
             thumbnails[i].Invalidate();
         }
     }

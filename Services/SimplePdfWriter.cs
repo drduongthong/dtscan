@@ -5,7 +5,7 @@ namespace DTScan.Services;
 
 public static class SimplePdfWriter
 {
-    public static void Save(List<Image> images, string filePath)
+    public static void Save(Func<int, Image> pageLoader, int pageCount, string filePath)
     {
         using var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write);
         var offsets = new List<long>();
@@ -19,13 +19,13 @@ public static class SimplePdfWriter
         // Object 2: Pages
         offsets.Add(fs.Position);
         var kids = string.Join(" ",
-            Enumerable.Range(0, images.Count).Select(i => $"{3 + i * 3} 0 R"));
-        Write(fs, $"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {images.Count} >>\nendobj\n");
+            Enumerable.Range(0, pageCount).Select(i => $"{3 + i * 3} 0 R"));
+        Write(fs, $"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {pageCount} >>\nendobj\n");
 
         // Each page: Page + ContentStream + ImageXObject (3 objects per page)
-        for (int i = 0; i < images.Count; i++)
+        for (int i = 0; i < pageCount; i++)
         {
-            var img = images[i];
+            using var img = pageLoader(i);
             byte[] jpegBytes = ImageToJpeg(img);
 
             int pageObj = 3 + i * 3;

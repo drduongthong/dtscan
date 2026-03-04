@@ -63,16 +63,23 @@ public sealed class ScannerService
             if (managerType != null)
             {
                 dynamic manager = Activator.CreateInstance(managerType)!;
-                dynamic deviceInfos = manager.DeviceInfos;
-                int count = (int)deviceInfos.Count;
-                for (int i = 1; i <= count; i++)
+                try
                 {
-                    dynamic info = deviceInfos[i];
-                    if ((int)info.Type == 1)
+                    dynamic deviceInfos = manager.DeviceInfos;
+                    int count = (int)deviceInfos.Count;
+                    for (int i = 1; i <= count; i++)
                     {
-                        string name = (string)info.Properties["Name"].get_Value();
-                        names.Add($"[WIA] {name}");
+                        dynamic info = deviceInfos[i];
+                        if ((int)info.Type == 1)
+                        {
+                            string name = (string)info.Properties["Name"].get_Value();
+                            names.Add($"[WIA] {name}");
+                        }
                     }
+                }
+                finally
+                {
+                    try { Marshal.ReleaseComObject(manager); } catch { }
                 }
             }
         }
@@ -85,29 +92,31 @@ public sealed class ScannerService
         ScanColorMode colorMode = ScanColorMode.Color,
         ScanDriver driver = ScanDriver.Auto,
         IntPtr windowHandle = default,
-        string preferredScanner = "")
+        string preferredScanner = "",
+        Action<Image>? onPageScanned = null)
     {
         if (windowHandle == IntPtr.Zero)
             windowHandle = Form.ActiveForm?.Handle ?? IntPtr.Zero;
 
         return driver switch
         {
-            ScanDriver.Twain => TwainScan(source, dpi, colorMode, windowHandle, preferredScanner),
-            ScanDriver.Wia => WiaScan(source, dpi, colorMode, preferredScanner),
-            _ => AutoScan(source, dpi, colorMode, windowHandle, preferredScanner)
+            ScanDriver.Twain => TwainScan(source, dpi, colorMode, windowHandle, preferredScanner, onPageScanned),
+            ScanDriver.Wia => WiaScan(source, dpi, colorMode, preferredScanner, onPageScanned),
+            _ => AutoScan(source, dpi, colorMode, windowHandle, preferredScanner, onPageScanned)
         };
     }
 
     private List<Image> AutoScan(ScanSource source, int dpi,
-        ScanColorMode colorMode, IntPtr hwnd, string preferredScanner)
+        ScanColorMode colorMode, IntPtr hwnd, string preferredScanner,
+        Action<Image>? onPageScanned)
     {
         try
         {
-            return TwainScan(source, dpi, colorMode, hwnd, preferredScanner);
+            return TwainScan(source, dpi, colorMode, hwnd, preferredScanner, onPageScanned);
         }
         catch
         {
-            return WiaScan(source, dpi, colorMode, preferredScanner);
+            return WiaScan(source, dpi, colorMode, preferredScanner, onPageScanned);
         }
     }
 
@@ -116,7 +125,8 @@ public sealed class ScannerService
     // ═══════════════════════════════════════════════
 
     private static List<Image> TwainScan(ScanSource source, int dpi,
-        ScanColorMode colorMode, IntPtr hwnd, string preferredScanner)
+        ScanColorMode colorMode, IntPtr hwnd, string preferredScanner,
+        Action<Image>? onPageScanned)
     {
         var pages = new List<Image>();
         Exception? scanError = null;
@@ -137,7 +147,16 @@ public sealed class ScannerService
                     if (stream != null)
                     {
                         using var img = Image.FromStream(stream);
-                        pages.Add(new Bitmap(img));
+                        var page = new Bitmap(img);
+                        if (onPageScanned != null)
+                        {
+                            try { onPageScanned(page); }
+                            finally { page.Dispose(); }
+                        }
+                        else
+                        {
+                            pages.Add(page);
+                        }
                     }
                 }
             }
@@ -224,8 +243,11 @@ public sealed class ScannerService
         }
 
         if (scanError != null)
+        {
+            foreach (var p in pages) p.Dispose();
             throw new InvalidOperationException(
                 $"Scan error: {scanError.Message}", scanError);
+        }
 
         return pages;
     }
@@ -240,18 +262,18 @@ public sealed class ScannerService
     // ═══════════════════════════════════════════════
 
     private static List<Image> WiaScan(ScanSource source, int dpi, ScanColorMode colorMode,
-        string preferredScanner)
+        string preferredScanner, Action<Image>? onPageScanned)
     {
         return source switch
         {
-            ScanSource.Feeder => WiaScanFromDevice(false, dpi, colorMode, preferredScanner),
-            ScanSource.Duplex => WiaScanFromDevice(true, dpi, colorMode, preferredScanner),
-            _ => WiaScanFlatbed(dpi, colorMode, preferredScanner)
+            ScanSource.Feeder => WiaScanFromDevice(false, dpi, colorMode, preferredScanner, onPageScanned),
+            ScanSource.Duplex => WiaScanFromDevice(true, dpi, colorMode, preferredScanner, onPageScanned),
+            _ => WiaScanFlatbed(dpi, colorMode, preferredScanner, onPageScanned)
         };
     }
 
     private static List<Image> WiaScanFlatbed(int dpi, ScanColorMode colorMode,
-        string preferredScanner)
+        string preferredScanner, Action<Image>? onPageScanned)
     {
         var pages = new List<Image>();
 
@@ -260,135 +282,175 @@ public sealed class ScannerService
                 "Windows Image Acquisition (WIA) is not available.");
         dynamic dialog = Activator.CreateInstance(dialogType)!;
 
-        dynamic device;
+        dynamic? device = null;
+        dynamic? item = null;
         try
         {
-            device = WiaConnectToScanner(preferredScanner);
-        }
-        catch (InvalidOperationException) { throw; }
-        catch (COMException ex)
-        {
-            throw new InvalidOperationException(
-                $"Cannot connect to scanner (0x{ex.HResult:X8}): {ex.Message}", ex);
-        }
+            try
+            {
+                device = WiaConnectToScanner(preferredScanner);
+            }
+            catch (InvalidOperationException) { throw; }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot connect to scanner (0x{ex.HResult:X8}): {ex.Message}", ex);
+            }
 
-        dynamic item;
-        try
-        {
-            item = device.Items[1];
+            try
+            {
+                item = device!.Items[1];
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "Scanner does not expose any scan items.", ex);
+            }
+
+            WiaTrySetProperty(item!.Properties, WIA_IPS_XRES, dpi);
+            WiaTrySetProperty(item.Properties, WIA_IPS_YRES, dpi);
+
+            int intent = colorMode switch
+            {
+                ScanColorMode.Color => 1,
+                ScanColorMode.Grayscale => 2,
+                ScanColorMode.BlackWhite => 4,
+                _ => 1
+            };
+            WiaTrySetProperty(item.Properties, WIA_IPS_CUR_INTENT, intent);
+
+            try
+            {
+                dynamic imageFile = dialog.ShowTransfer(item, WIA_FORMAT_BMP, false);
+
+                if (imageFile != null)
+                {
+                    var page = LoadWiaImage(imageFile);
+                    if (onPageScanned != null)
+                    {
+                        try { onPageScanned(page); }
+                        finally { page.Dispose(); }
+                    }
+                    else
+                    {
+                        pages.Add(page);
+                    }
+                }
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Scanner error (0x{ex.HResult:X8}): {ex.Message}", ex);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            throw new InvalidOperationException(
-                "Scanner does not expose any scan items.", ex);
-        }
-
-        WiaTrySetProperty(item.Properties, WIA_IPS_XRES, dpi);
-        WiaTrySetProperty(item.Properties, WIA_IPS_YRES, dpi);
-
-        int intent = colorMode switch
-        {
-            ScanColorMode.Color => 1,
-            ScanColorMode.Grayscale => 2,
-            ScanColorMode.BlackWhite => 4,
-            _ => 1
-        };
-        WiaTrySetProperty(item.Properties, WIA_IPS_CUR_INTENT, intent);
-
-        try
-        {
-            dynamic imageFile = dialog.ShowTransfer(item, WIA_FORMAT_BMP, false);
-
-            if (imageFile != null)
-                pages.Add(LoadWiaImage(imageFile));
-        }
-        catch (COMException ex)
-        {
-            throw new InvalidOperationException(
-                $"Scanner error (0x{ex.HResult:X8}): {ex.Message}", ex);
+            if (item != null) try { Marshal.ReleaseComObject(item); } catch { }
+            if (device != null) try { Marshal.ReleaseComObject(device); } catch { }
+            try { Marshal.ReleaseComObject(dialog); } catch { }
         }
 
         return pages;
     }
 
     private static List<Image> WiaScanFromDevice(bool duplex, int dpi, ScanColorMode colorMode,
-        string preferredScanner)
+        string preferredScanner, Action<Image>? onPageScanned)
     {
         var pages = new List<Image>();
+        int scannedCount = 0;
 
         var dialogType = Type.GetTypeFromProgID("WIA.CommonDialog")
             ?? throw new InvalidOperationException(
                 "Windows Image Acquisition (WIA) is not available.");
         dynamic dialog = Activator.CreateInstance(dialogType)!;
 
-        dynamic device;
+        dynamic? device = null;
+        dynamic? item = null;
         try
-        {
-            device = WiaConnectToScanner(preferredScanner);
-        }
-        catch (InvalidOperationException) { throw; }
-        catch (COMException ex)
-        {
-            throw new InvalidOperationException(
-                $"Cannot connect to scanner (0x{ex.HResult:X8}): {ex.Message}", ex);
-        }
-
-        int handling = duplex ? (WIA_FEEDER | WIA_DUPLEX) : WIA_FEEDER;
-        WiaTrySetProperty(device.Properties, WIA_DPS_DOCUMENT_HANDLING_SELECT, handling);
-        WiaTrySetProperty(device.Properties, WIA_IPS_PAGES, 0);
-
-        dynamic item;
-        try
-        {
-            item = device.Items[1];
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException(
-                "Scanner does not expose any scan items. " +
-                "Try switching to Flatbed mode.", ex);
-        }
-
-        WiaTrySetProperty(item.Properties, WIA_IPS_XRES, dpi);
-        WiaTrySetProperty(item.Properties, WIA_IPS_YRES, dpi);
-
-        int intent = colorMode switch
-        {
-            ScanColorMode.Color => 1,
-            ScanColorMode.Grayscale => 2,
-            ScanColorMode.BlackWhite => 4,
-            _ => 1
-        };
-        WiaTrySetProperty(item.Properties, WIA_IPS_CUR_INTENT, intent);
-
-        bool hasMore = true;
-        while (hasMore)
         {
             try
             {
-                dynamic imageFile = dialog.ShowTransfer(item, WIA_FORMAT_BMP, false);
+                device = WiaConnectToScanner(preferredScanner);
+            }
+            catch (InvalidOperationException) { throw; }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot connect to scanner (0x{ex.HResult:X8}): {ex.Message}", ex);
+            }
 
-                if (imageFile == null)
+            int handling = duplex ? (WIA_FEEDER | WIA_DUPLEX) : WIA_FEEDER;
+            WiaTrySetProperty(device!.Properties, WIA_DPS_DOCUMENT_HANDLING_SELECT, handling);
+            WiaTrySetProperty(device.Properties, WIA_IPS_PAGES, 0);
+
+            try
+            {
+                item = device.Items[1];
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "Scanner does not expose any scan items. " +
+                    "Try switching to Flatbed mode.", ex);
+            }
+
+            WiaTrySetProperty(item!.Properties, WIA_IPS_XRES, dpi);
+            WiaTrySetProperty(item.Properties, WIA_IPS_YRES, dpi);
+
+            int intent = colorMode switch
+            {
+                ScanColorMode.Color => 1,
+                ScanColorMode.Grayscale => 2,
+                ScanColorMode.BlackWhite => 4,
+                _ => 1
+            };
+            WiaTrySetProperty(item.Properties, WIA_IPS_CUR_INTENT, intent);
+
+            bool hasMore = true;
+            while (hasMore)
+            {
+                try
+                {
+                    dynamic imageFile = dialog.ShowTransfer(item, WIA_FORMAT_BMP, false);
+
+                    if (imageFile == null)
+                    {
+                        hasMore = false;
+                    }
+                    else
+                    {
+                        var page = LoadWiaImage(imageFile);
+                        scannedCount++;
+                        if (onPageScanned != null)
+                        {
+                            try { onPageScanned(page); }
+                            finally { page.Dispose(); }
+                        }
+                        else
+                        {
+                            pages.Add(page);
+                        }
+                        hasMore = WiaIsFeedReady(device);
+                    }
+                }
+                catch (COMException ex) when (WiaIsPaperEmpty(ex))
                 {
                     hasMore = false;
                 }
-                else
+                catch (COMException ex)
                 {
-                    pages.Add(LoadWiaImage(imageFile));
-                    hasMore = WiaIsFeedReady(device);
+                    if (scannedCount == 0)
+                        throw new InvalidOperationException(
+                            $"Scan error (0x{ex.HResult:X8}): {ex.Message}", ex);
+                    hasMore = false;
                 }
             }
-            catch (COMException ex) when (WiaIsPaperEmpty(ex))
-            {
-                hasMore = false;
-            }
-            catch (COMException ex)
-            {
-                if (pages.Count == 0)
-                    throw new InvalidOperationException(
-                        $"Scan error (0x{ex.HResult:X8}): {ex.Message}", ex);
-                hasMore = false;
-            }
+        }
+        finally
+        {
+            if (item != null) try { Marshal.ReleaseComObject(item); } catch { }
+            if (device != null) try { Marshal.ReleaseComObject(device); } catch { }
+            try { Marshal.ReleaseComObject(dialog); } catch { }
         }
 
         return pages;
@@ -409,6 +471,7 @@ public sealed class ScannerService
         }
         finally
         {
+            try { Marshal.ReleaseComObject(imageFile); } catch { }
             try { File.Delete(tempPath); } catch { }
         }
     }
@@ -420,40 +483,47 @@ public sealed class ScannerService
                 "Windows Image Acquisition (WIA) is not available.");
         dynamic manager = Activator.CreateInstance(managerType)!;
 
-        dynamic deviceInfos = manager.DeviceInfos;
-        int count = (int)deviceInfos.Count;
-
-        var preferred = preferredScanner.StartsWith("[WIA] ")
-            ? preferredScanner[6..] : preferredScanner;
-
-        // Try to find the preferred scanner first
-        if (!string.IsNullOrEmpty(preferred))
+        try
         {
+            dynamic deviceInfos = manager.DeviceInfos;
+            int count = (int)deviceInfos.Count;
+
+            var preferred = preferredScanner.StartsWith("[WIA] ")
+                ? preferredScanner[6..] : preferredScanner;
+
+            // Try to find the preferred scanner first
+            if (!string.IsNullOrEmpty(preferred))
+            {
+                for (int i = 1; i <= count; i++)
+                {
+                    dynamic info = deviceInfos[i];
+                    if ((int)info.Type == 1)
+                    {
+                        string name = (string)info.Properties["Name"].get_Value();
+                        if (name == preferred)
+                            return info.Connect();
+                    }
+                }
+            }
+
+            // Fallback: first available scanner
             for (int i = 1; i <= count; i++)
             {
                 dynamic info = deviceInfos[i];
                 if ((int)info.Type == 1)
-                {
-                    string name = (string)info.Properties["Name"].get_Value();
-                    if (name == preferred)
-                        return info.Connect();
-                }
+                    return info.Connect();
             }
-        }
 
-        // Fallback: first available scanner
-        for (int i = 1; i <= count; i++)
+            throw new InvalidOperationException(
+                "No WIA scanner found.\n\n" +
+                "• Ensure the scanner is connected and powered on.\n" +
+                "• Check that WIA-compatible drivers are installed.\n" +
+                $"• Total WIA devices detected: {count}");
+        }
+        finally
         {
-            dynamic info = deviceInfos[i];
-            if ((int)info.Type == 1)
-                return info.Connect();
+            try { Marshal.ReleaseComObject(manager); } catch { }
         }
-
-        throw new InvalidOperationException(
-            "No WIA scanner found.\n\n" +
-            "• Ensure the scanner is connected and powered on.\n" +
-            "• Check that WIA-compatible drivers are installed.\n" +
-            $"• Total WIA devices detected: {count}");
     }
 
     private static bool WiaIsFeedReady(dynamic device)

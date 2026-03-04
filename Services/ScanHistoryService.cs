@@ -29,11 +29,12 @@ public sealed class ScanHistoryService
     //  SAVE BACKUP — chạy nền, trả entry ngay lập tức
     // ═══════════════════════════════════════════════
 
-    public ScanHistoryEntry SaveBackup(List<Image> pages, UserProfile profile)
+    public ScanHistoryEntry SaveBackup(Func<int, Image> pageLoader, int pageCount,
+        UserProfile profile)
     {
         var entry = new ScanHistoryEntry
         {
-            PageCount = pages.Count,
+            PageCount = pageCount,
             ProfileName = profile.Name,
             ScanSource = profile.ScanSource.ToString(),
             Dpi = profile.ScanDpi,
@@ -44,18 +45,19 @@ public sealed class ScanHistoryService
         Directory.CreateDirectory(folder);
         entry.BackupFolderPath = folder;
 
-        // Clone ảnh trên UI thread (memory copy nhanh)
-        // để background thread encode PNG + ghi file độc lập
-        var clones = new List<Bitmap>(pages.Count);
-        try
+        // Encode từng trang sang JPEG — load 1 trang từ disk tại 1 thời điểm
+        var codec = ImageCodecInfo.GetImageEncoders()
+            .First(c => c.FormatID == ImageFormat.Jpeg.Guid);
+        using var encParams = new EncoderParameters(1);
+        encParams.Param[0] = new EncoderParameter(Encoder.Quality, 80L);
+
+        var encodedPages = new List<byte[]>(pageCount);
+        for (int i = 0; i < pageCount; i++)
         {
-            foreach (var p in pages)
-                clones.Add(new Bitmap(p));
-        }
-        catch
-        {
-            foreach (var c in clones) c.Dispose();
-            throw;
+            using var img = pageLoader(i);
+            using var ms = new MemoryStream();
+            img.Save(ms, codec, encParams);
+            encodedPages.Add(ms.ToArray());
         }
 
         lock (_lock)
@@ -69,11 +71,11 @@ public sealed class ScanHistoryService
             try
             {
                 long totalSize = 0;
-                for (int i = 0; i < clones.Count; i++)
+                for (int i = 0; i < encodedPages.Count; i++)
                 {
-                    var path = Path.Combine(folder, $"page_{i + 1:D4}.png");
-                    clones[i].Save(path, ImageFormat.Png);
-                    totalSize += new FileInfo(path).Length;
+                    var path = Path.Combine(folder, $"page_{i + 1:D4}.jpg");
+                    File.WriteAllBytes(path, encodedPages[i]);
+                    totalSize += encodedPages[i].Length;
                 }
 
                 lock (_lock)
@@ -84,7 +86,7 @@ public sealed class ScanHistoryService
             }
             finally
             {
-                foreach (var c in clones) c.Dispose();
+                encodedPages.Clear();
                 _pendingSaves.TryRemove(entry.Id, out _);
             }
         });
@@ -105,7 +107,8 @@ public sealed class ScanHistoryService
         var images = new List<Image>();
         if (!Directory.Exists(entry.BackupFolderPath)) return images;
 
-        var files = Directory.GetFiles(entry.BackupFolderPath, "page_*.png")
+        var files = Directory.GetFiles(entry.BackupFolderPath, "page_*.jpg")
+            .Concat(Directory.GetFiles(entry.BackupFolderPath, "page_*.png"))
             .OrderBy(f => f).ToList();
 
         foreach (var file in files)

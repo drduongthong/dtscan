@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("DTScan")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f92d499ade655b8afcdc21c63988ba0890dbff99")]
 [assembly: System.Reflection.AssemblyProductAttribute("DTScan")]
 [assembly: System.Reflection.AssemblyTitleAttribute("DTScan")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
