@@ -10,10 +10,25 @@
     <Compile Update="Controls\ZoomableImagePanel.cs">
       <SubType>Component</SubType>
     </Compile>
-    <Compile Update="Form1.cs">
+    <Compile Update="DTScan\Form1.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="DTScan\Form1.Pages.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="DTScan\Form1.Save.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="DTScan\Form1.Scan.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="DTScan\Form1.UI.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\ProfileEditorForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="Forms\ProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Update="Forms\ScanHistoryForm.cs">
