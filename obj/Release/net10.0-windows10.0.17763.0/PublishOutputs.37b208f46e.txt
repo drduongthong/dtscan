@@ -1,0 +1,9 @@
+D:\01.CODE\13.DTScan\DTScan\bin\publish\DTScan.exe
+D:\01.CODE\13.DTScan\DTScan\bin\publish\Assets\DTScan.ico
+D:\01.CODE\13.DTScan\DTScan\bin\publish\DTScan.dll
+D:\01.CODE\13.DTScan\DTScan\bin\publish\DTScan.deps.json
+D:\01.CODE\13.DTScan\DTScan\bin\publish\DTScan.runtimeconfig.json
+D:\01.CODE\13.DTScan\DTScan\bin\publish\DTScan.pdb
+D:\01.CODE\13.DTScan\DTScan\bin\publish\Microsoft.Windows.SDK.NET.dll
+D:\01.CODE\13.DTScan\DTScan\bin\publish\WinRT.Runtime.dll
+D:\01.CODE\13.DTScan\DTScan\bin\publish\NTwain.dll

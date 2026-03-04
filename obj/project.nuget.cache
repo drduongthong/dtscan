@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "fz5pRmezYL4=",
+  "success": true,
+  "projectFilePath": "D:\\01.CODE\\13.DTScan\\DTScan\\DTScan.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\chris\\.nuget\\packages\\ntwain\\3.7.5\\ntwain.3.7.5.nupkg.sha512",
+    "C:\\Users\\chris\\.nuget\\packages\\microsoft.windows.sdk.net.ref\\10.0.17763.57\\microsoft.windows.sdk.net.ref.10.0.17763.57.nupkg.sha512"
+  ],
+  "logs": []
+}

@@ -1,0 +1,28 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "NTwain/3.7.5": {
+        "runtime": {
+          "lib/net6.0-windows7.0/NTwain.dll": {
+            "assemblyVersion": "3.0.0.0",
+            "fileVersion": "3.7.5.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "NTwain/3.7.5": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-R53SqImludDUk8Jn5cgaEq9cCsQ5Wxoup40Cpj7HDn8Wiuma0OVbGclOQQ9fQZG31QBsEPEb2TODBGBD/7a2JA==",
+      "path": "ntwain/3.7.5",
+      "hashPath": "ntwain.3.7.5.nupkg.sha512"
+    }
+  }
+}
